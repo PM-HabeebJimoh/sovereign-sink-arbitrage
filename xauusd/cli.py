@@ -1,0 +1,141 @@
+"""Command line interface for the XAUUSD research-only model."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence
+
+from .config import ResearchConfig
+from .data import DataError, download_yahoo_30m, load_bars
+from .features import build_features
+from .research import predict_latest_from_bars, run_research
+
+
+def _write_json(path: str | Path, payload: Dict[str, Any]) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _config_from_args(args: argparse.Namespace) -> ResearchConfig:
+    return ResearchConfig(
+        horizon_bars=args.horizon,
+        label_threshold_bps=args.label_threshold_bps,
+        label_atr_fraction=args.label_atr_fraction,
+        target_hit_rate=args.target_hit_rate,
+        min_validation_signals=args.min_validation_signals,
+        round_trip_cost_bps=args.round_trip_cost_bps,
+        slippage_bps=args.slippage_bps,
+        min_rows=args.min_rows,
+        random_state=args.random_state,
+        rf_estimators=args.rf_estimators,
+        hgb_max_iter=args.hgb_max_iter,
+    )
+
+
+def _add_research_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--horizon", type=int, default=1, help="bars ahead; 1 means the next 30m bar")
+    parser.add_argument("--label-threshold-bps", type=float, default=5.0, help="fixed dead-zone for labels")
+    parser.add_argument("--label-atr-fraction", type=float, default=0.10, help="ATR-relative dead-zone")
+    parser.add_argument("--target-hit-rate", type=float, default=0.80, help="validation/test selection target")
+    parser.add_argument("--min-validation-signals", type=int, default=25)
+    parser.add_argument("--round-trip-cost-bps", type=float, default=4.0)
+    parser.add_argument("--slippage-bps", type=float, default=1.0)
+    parser.add_argument("--min-rows", type=int, default=500, help="warn when less history is supplied")
+    parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--rf-estimators", type=int, default=180)
+    parser.add_argument("--hgb-max-iter", type=int, default=220)
+    parser.add_argument(
+        "--walk-forward-folds",
+        type=int,
+        default=0,
+        help="also run rolling-origin folds (5 is a good research check; adds compute)",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xauusd",
+        description="Leakage-resistant XAUUSD 30-minute direction research; no order execution.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    train = subparsers.add_parser("train", help="train and score a chronological holdout")
+    train.add_argument("--csv", required=True, help="broker/vendor OHLCV CSV")
+    train.add_argument("--model", default="artifacts/xauusd_30m.joblib")
+    train.add_argument("--report", default="reports/xauusd_30m.json")
+    _add_research_options(train)
+
+    predict = subparsers.add_parser("predict", help="score the latest complete bar; never places an order")
+    predict.add_argument("--csv", required=True)
+    predict.add_argument("--model", default="artifacts/xauusd_30m.joblib")
+    predict.add_argument("--json", action="store_true", help="emit JSON only")
+
+    download = subparsers.add_parser("download-yahoo", help="download a small 30m experiment data set")
+    download.add_argument("--symbol", default="GC=F", help="GC=F futures; not broker spot XAUUSD")
+    download.add_argument("--out", required=True)
+
+    quality = subparsers.add_parser("quality", help="validate a CSV and print its data-quality report")
+    quality.add_argument("--csv", required=True)
+
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "quality":
+            _, report = load_bars(args.csv, return_report=True)
+            print(json.dumps(report.to_dict(), indent=2, default=str))
+            return 0
+
+        if args.command == "download-yahoo":
+            bars = download_yahoo_30m(args.symbol)
+            destination = Path(args.out)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            bars.reset_index().to_csv(destination, index=False)
+            print(f"wrote {len(bars)} 30-minute bars to {destination}")
+            return 0
+
+        if args.command == "train":
+            bars, data_report = load_bars(args.csv, return_report=True)
+            config = _config_from_args(args)
+            result = run_research(bars, config)
+            result.report["data_quality"] = data_report.to_dict()
+            if args.walk_forward_folds:
+                if args.walk_forward_folds < 2:
+                    raise ValueError("--walk-forward-folds must be 0 or at least 2")
+                from .walk_forward import run_walk_forward
+                result.report["walk_forward"] = run_walk_forward(
+                    bars, config, n_splits=args.walk_forward_folds
+                )
+            result.save(args.model)
+            _write_json(args.report, result.report)
+            print(json.dumps({
+                "status": result.report["status"],
+                "model": str(args.model),
+                "report": str(args.report),
+                "validation": result.report.get("validation", {}),
+                "test": result.report.get("test", {}),
+                "certification": result.report.get("certification", {}),
+            }, indent=2, default=str))
+            return 0 if result.report["status"] == "target_met_on_holdout" else 2
+
+        if args.command == "predict":
+            bars = load_bars(args.csv)
+            signal = predict_latest_from_bars(bars, args.model)
+            if args.json:
+                print(json.dumps(signal, indent=2, default=str))
+            else:
+                print(
+                    f"{signal['timestamp']} | {signal['direction']} | "
+                    f"p_up={signal['p_up']:.3f} confidence={signal['confidence']:.3f} "
+                    f"agreement={signal['agreement']:.3f} take_signal={signal['take_signal']}"
+                )
+            return 0
+    except (DataError, ValueError, RuntimeError, ImportError) as exc:
+        parser.error(str(exc))
+    return 1
