@@ -313,6 +313,85 @@ def load_bars(
     )
 
 
+def download_dukascopy_xauusd(
+    destination: Union[str, Path],
+    *,
+    date_from: str,
+    date_to: str,
+    timeframe_minutes: int = 30,
+    price_type: str = "bid",
+    timeout: int = 1800,
+) -> pd.DataFrame:
+    """Download exact public XAU/USD candles through ``dukascopy-node``.
+
+    Dukascopy publishes historical XAU/USD data publicly, but its artifact
+    feed is binary.  The maintained Node downloader handles decompression and
+    aggregation.  This helper keeps that dependency out of the Python model
+    and normalises the resulting CSV for the research pipeline.
+    """
+
+    if timeframe_minutes not in (30, 60):
+        raise DataError("timeframe_minutes must be 30 or 60")
+    if price_type not in ("bid", "ask"):
+        raise DataError("price_type must be bid or ask")
+    import shutil
+    import subprocess
+    import tempfile
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    timeframe = "m30" if timeframe_minutes == 30 else "h1"
+    with tempfile.TemporaryDirectory(prefix="xauusd-dukascopy-") as temp_dir:
+        command = [
+            "npx",
+            "--yes",
+            "dukascopy-node",
+            "-i",
+            "xauusd",
+            "-from",
+            str(date_from),
+            "-to",
+            str(date_to),
+            "-t",
+            timeframe,
+            "-p",
+            price_type,
+            "-v",
+            "-f",
+            "csv",
+            "-dir",
+            temp_dir,
+            "-fn",
+            f"xauusd_{timeframe_minutes}m",
+            "-r",
+            "2",
+            "-rp",
+            "1000",
+            "-s",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise DataError("Node.js/npm is required for the Dukascopy downloader") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise DataError(f"Dukascopy download exceeded {timeout} seconds") from exc
+        if completed.returncode != 0:
+            message = (completed.stderr or completed.stdout or "unknown downloader error").strip()
+            raise DataError(f"Dukascopy download failed: {message[-500:]}")
+        candidates = sorted(Path(temp_dir).rglob("*.csv"))
+        if not candidates:
+            raise DataError("Dukascopy returned no CSV file")
+        shutil.copyfile(candidates[0], destination)
+
+    return load_bars(destination, timeframe_minutes=timeframe_minutes)
+
+
 def download_yahoo_intraday(
     symbol: str = "GC=F",
     *,

@@ -43,7 +43,23 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Supply real XAUUSD data
+### 2. Get real XAUUSD data
+
+The repository can download exact public Dukascopy XAU/USD candles when Node.js/npm is available:
+
+```bash
+python -m xauusd download-dukascopy \
+  --from 2024-01-01 --to 2026-08-01 \
+  --timeframe 30 --price-type bid \
+  --out data/xauusd_m30.csv
+
+python -m xauusd download-dukascopy \
+  --from 2024-01-01 --to 2026-08-01 \
+  --timeframe 60 --price-type bid \
+  --out data/xauusd_h1.csv
+```
+
+This uses the public `dukascopy-node` downloader and does not use synthetic prices. If the public feed is unavailable from the current network, export the same instrument/timeframe from your broker and use that CSV instead.
 
 Use a broker or institutional export whenever possible. The CSV must contain:
 

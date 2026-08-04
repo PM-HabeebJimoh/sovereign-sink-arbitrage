@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from .config import ResearchConfig
-from .data import DataError, download_yahoo_intraday, load_bars
+from .data import DataError, download_dukascopy_xauusd, download_yahoo_intraday, load_bars
 from .features import build_features
 from .research import predict_latest_from_bars, run_forward_dry_run, run_research
 
@@ -91,6 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--timeframe", type=int, choices=(30, 60), default=30)
     download.add_argument("--out", required=True)
 
+    dukascopy = subparsers.add_parser(
+        "download-dukascopy",
+        help="download exact public XAU/USD candles through dukascopy-node",
+    )
+    dukascopy.add_argument("--from", dest="date_from", required=True, help="inclusive UTC date, YYYY-MM-DD")
+    dukascopy.add_argument("--to", dest="date_to", required=True, help="exclusive UTC date, YYYY-MM-DD")
+    dukascopy.add_argument("--timeframe", type=int, choices=(30, 60), default=30)
+    dukascopy.add_argument("--price-type", choices=("bid", "ask"), default="bid")
+    dukascopy.add_argument("--out", required=True)
+
     quality = subparsers.add_parser("quality", help="validate a CSV and print its data-quality report")
     quality.add_argument("--csv", required=True)
     quality.add_argument("--timeframe", type=int, choices=(30, 60), default=30)
@@ -117,6 +127,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             destination.parent.mkdir(parents=True, exist_ok=True)
             bars.reset_index().to_csv(destination, index=False)
             print(f"wrote {len(bars)} {args.timeframe}-minute bars to {destination}")
+            return 0
+
+        if args.command == "download-dukascopy":
+            bars = download_dukascopy_xauusd(
+                args.out,
+                date_from=args.date_from,
+                date_to=args.date_to,
+                timeframe_minutes=args.timeframe,
+                price_type=args.price_type,
+            )
+            print(
+                f"wrote {len(bars)} exact XAU/USD {args.timeframe}-minute "
+                f"{args.price_type} bars to {args.out}"
+            )
             return 0
 
         if args.command == "train":
