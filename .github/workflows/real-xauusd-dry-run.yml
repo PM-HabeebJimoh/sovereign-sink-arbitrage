@@ -1,0 +1,93 @@
+name: Real XAUUSD forward dry run
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Inclusive UTC forward-test start"
+        required: false
+        default: "2026-07-01"
+      end:
+        description: "Exclusive UTC forward-test end"
+        required: false
+        default: "2026-08-01"
+
+permissions:
+  contents: read
+
+jobs:
+  run-real-market-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the research code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for the public Dukascopy downloader
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download real XAU/USD bid candles from Dukascopy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/real/m30 data/real/h1
+          npx --yes dukascopy-node \
+            -i xauusd -from 2024-01-01 -to "${{ inputs.end || '2026-08-01' }}" \
+            -t m30 -p bid -v -f csv -dir data/real/m30 -fn xauusd_m30 \
+            -r 2 -rp 1000 -s
+          npx --yes dukascopy-node \
+            -i xauusd -from 2024-01-01 -to "${{ inputs.end || '2026-08-01' }}" \
+            -t h1 -p bid -v -f csv -dir data/real/h1 -fn xauusd_h1 \
+            -r 2 -rp 1000 -s
+          find data/real -type f -maxdepth 3 -print
+
+      - name: Set up Python and install the model
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements.txt
+
+      - name: Run the 30-minute forward dry run
+        run: |
+          python -m xauusd dry-run \
+            --csv data/real/m30/xauusd_m30.csv \
+            --timeframe 30 \
+            --start "${{ inputs.start || '2026-07-01' }}" \
+            --end "${{ inputs.end || '2026-08-01' }}" \
+            --model reports/xauusd_m30.joblib \
+            --report reports/xauusd_m30.json || [[ $? -eq 2 ]]
+
+      - name: Run the 1-hour forward dry run
+        run: |
+          python -m xauusd dry-run \
+            --csv data/real/h1/xauusd_h1.csv \
+            --timeframe 60 \
+            --start "${{ inputs.start || '2026-07-01' }}" \
+            --end "${{ inputs.end || '2026-08-01' }}" \
+            --model reports/xauusd_h1.joblib \
+            --report reports/xauusd_h1.json || [[ $? -eq 2 ]]
+
+      - name: Write source and file checksums
+        if: always()
+        run: |
+          {
+            echo "source=Dukascopy Bank SA public historical feed"
+            echo "instrument=xauusd"
+            echo "price_type=bid"
+            echo "training_from=2024-01-01"
+            echo "forward_start=${{ inputs.start || '2026-07-01' }}"
+            echo "forward_end_exclusive=${{ inputs.end || '2026-08-01' }}"
+            sha256sum data/real/m30/xauusd_m30.csv data/real/h1/xauusd_h1.csv || true
+          } > reports/data_provenance.txt
+
+      - name: Upload reports and exact raw data used
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xauusd-real-forward-dry-run
+          path: |
+            reports/
+            data/real/
+          retention-days: 14

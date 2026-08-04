@@ -83,6 +83,7 @@ def run_walk_forward(
         raise ValueError("n_splits must be at least 2")
     labelled, feature_columns = build_labeled_frame(
         bars,
+        timeframe_minutes=cfg.timeframe_minutes,
         horizon_bars=cfg.horizon_bars,
         label_threshold_bps=cfg.label_threshold_bps,
         label_atr_fraction=cfg.label_atr_fraction,

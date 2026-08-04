@@ -194,6 +194,7 @@ def build_features(bars: pd.DataFrame) -> pd.DataFrame:
 def build_labeled_frame(
     bars: pd.DataFrame,
     *,
+    timeframe_minutes: int = 30,
     horizon_bars: int = 1,
     label_threshold_bps: float = 5.0,
     label_atr_fraction: float = 0.10,
@@ -202,20 +203,32 @@ def build_labeled_frame(
 
     A prediction is made after bar ``t`` closes and entered at bar ``t+1``'s
     open.  For ``horizon_bars=1`` the outcome is the next bar's open-to-close
-    log return.  A neutral/dead-zone outcome is excluded from training; this
+    log return (30 minutes or 1 hour, according to ``timeframe_minutes``).
+    A neutral/dead-zone outcome is excluded from training; this
     is explicit abstention, not a silently relabelled win.
     """
 
+    if timeframe_minutes not in (30, 60):
+        raise ValueError("timeframe_minutes must be 30 or 60")
     if horizon_bars < 1:
         raise ValueError("horizon_bars must be >= 1")
     if label_threshold_bps < 0 or label_atr_fraction < 0:
         raise ValueError("label thresholds cannot be negative")
 
-    bars = prepare_bars(bars, resample=False)
+    bars = prepare_bars(bars, timeframe_minutes=timeframe_minutes, resample=True)
     features = build_features(bars)
     entry = bars["open"].shift(-1)
     exit_ = bars["close"].shift(-horizon_bars)
     future_return = np.log(exit_ / entry)
+    # A Friday-to-Monday jump is not a one-bar 30m/1h outcome.  Require the
+    # bars used by the horizon to be contiguous; gaps remain out of sample
+    # rather than being silently scored as an intraday prediction.
+    expected_delta = pd.Timedelta(minutes=int(timeframe_minutes))
+    future_timestamp = pd.Series(bars.index, index=bars.index).shift(-horizon_bars)
+    contiguous = future_timestamp.sub(pd.Series(bars.index, index=bars.index)) <= (
+        expected_delta * horizon_bars * 1.5
+    )
+    future_return = future_return.where(contiguous)
 
     atr_bps = features["atr_14_pct"].abs() * 10000.0
     dead_zone_bps = np.maximum(float(label_threshold_bps), float(label_atr_fraction) * atr_bps)

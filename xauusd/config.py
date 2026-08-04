@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple
 
 @dataclass(frozen=True)
 class ResearchConfig:
-    """Reproducible defaults for a 30-minute, cost-aware experiment.
+    """Reproducible defaults for a 30-minute or 1-hour, cost-aware experiment.
 
     The 80% value is a *selection target*, not a guaranteed outcome.  The
     policy is allowed to abstain.  A result is only considered useful when it
@@ -55,8 +55,8 @@ class ResearchConfig:
     min_rows: int = 500
 
     def __post_init__(self) -> None:
-        if self.timeframe_minutes != 30:
-            raise ValueError("This model is intentionally fixed to a 30-minute timeframe")
+        if self.timeframe_minutes not in (30, 60):
+            raise ValueError("timeframe_minutes must be 30 or 60")
         if self.horizon_bars < 1:
             raise ValueError("horizon_bars must be >= 1")
         if not 0 < self.target_hit_rate < 1:

@@ -26,11 +26,12 @@ class DataQualityReport:
     rows: int
     start: str
     end: str
+    timeframe_minutes: int
     median_interval_minutes: float
     largest_gap_minutes: float
-    gaps_over_45m: int
+    gaps_over_expected: int
     duplicate_timestamps_removed: int
-    resampled_to_30m: bool
+    resampled_to_timeframe: bool
     has_volume: bool
     external_columns: Tuple[str, ...]
 
@@ -170,8 +171,8 @@ def _normalise_frame(frame: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     return renamed, duplicate_count
 
 
-def _resample_30m(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert lower/higher frequency bars into right-labelled 30m bars."""
+def _resample_bars(frame: pd.DataFrame, timeframe_minutes: int) -> pd.DataFrame:
+    """Convert lower-frequency bars into right-labelled target bars."""
 
     aggregations: Dict[str, str] = {
         "open": "first",
@@ -182,21 +183,22 @@ def _resample_30m(frame: pd.DataFrame) -> pd.DataFrame:
     if "volume" in frame.columns:
         aggregations["volume"] = "sum"
 
-    resampler = frame.resample("30min", label="right", closed="right")
+    rule = f"{int(timeframe_minutes)}min"
+    resampler = frame.resample(rule, label="right", closed="right")
     result = resampler.agg(aggregations)
     # Do not keep a partially populated first/last aggregate.  A 15-minute
     # source should contribute two observations to a complete 30-minute bar;
     # a 1-minute source should contribute roughly thirty.
     source_deltas = frame.index.to_series().diff().dropna().dt.total_seconds().div(60)
-    expected_count = max(1, int(round(30.0 / float(source_deltas.median())))) if not source_deltas.empty else 1
-    source_count = frame["close"].resample("30min", label="right", closed="right").count()
+    expected_count = max(1, int(round(float(timeframe_minutes) / float(source_deltas.median())))) if not source_deltas.empty else 1
+    source_count = frame["close"].resample(rule, label="right", closed="right").count()
     result = result.loc[source_count >= expected_count]
     for column in frame.columns:
         if column in aggregations:
             continue
         # External drivers are sampled at the last known value in the bar;
         # they must already be time-aligned by their provider.
-        result[column] = frame[column].resample("30min", label="right", closed="right").last()
+        result[column] = frame[column].resample(rule, label="right", closed="right").last()
     result = result.dropna(subset=["open", "high", "low", "close"])
     result.index.name = "timestamp"
     return result
@@ -205,40 +207,48 @@ def _resample_30m(frame: pd.DataFrame) -> pd.DataFrame:
 def prepare_bars(
     frame: pd.DataFrame,
     *,
+    timeframe_minutes: int = 30,
     resample: bool = True,
     return_report: bool = False,
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, DataQualityReport]]:
-    """Validate and optionally normalise bars to a 30-minute index.
+    """Validate and optionally normalise bars to a 30-minute or 1-hour index.
 
     Parameters
     ----------
     frame:
         A DataFrame with timestamp/open/high/low/close.  Timestamps are
         converted to UTC.  They are interpreted as bar close times.
+    timeframe_minutes:
+        Target bar size. The research models support 30 and 60 minutes.
     resample:
-        Resample when the median source interval is not 30 minutes.  Already
-        30-minute data is not shifted or needlessly aggregated.
+        Resample lower-frequency source data when the median interval is
+        different from the target. Higher-frequency source bars can be
+        aggregated; higher-timeframe data is rejected rather than fabricated.
     return_report:
         Return ``(bars, quality_report)`` when true.
     """
 
+    if timeframe_minutes not in (30, 60):
+        raise DataError("timeframe_minutes must be 30 or 60")
     normalised, duplicate_count = _normalise_frame(frame)
     deltas = normalised.index.to_series().diff().dropna().dt.total_seconds().div(60)
-    median_interval = float(deltas.median()) if not deltas.empty else 30.0
-    if resample and not deltas.empty and median_interval > 31.0:
+    median_interval = float(deltas.median()) if not deltas.empty else float(timeframe_minutes)
+    if resample and not deltas.empty and median_interval > float(timeframe_minutes) + 1.0:
         raise DataError(
-            f"source interval is {median_interval:.1f} minutes; a 30-minute model cannot reconstruct "
+            f"source interval is {median_interval:.1f} minutes; a {timeframe_minutes}-minute model cannot reconstruct "
             "missing intrabar prices from higher-timeframe data"
         )
-    should_resample = bool(resample and (not deltas.empty) and abs(median_interval - 30.0) > 1.0)
-    bars = _resample_30m(normalised) if should_resample else normalised
+    should_resample = bool(
+        resample and (not deltas.empty) and abs(median_interval - float(timeframe_minutes)) > 1.0
+    )
+    bars = _resample_bars(normalised, timeframe_minutes) if should_resample else normalised
 
     if bars.empty:
-        raise DataError("no complete 30-minute bars remain")
+        raise DataError(f"no complete {timeframe_minutes}-minute bars remain")
 
     post_deltas = bars.index.to_series().diff().dropna().dt.total_seconds().div(60)
     largest_gap = float(post_deltas.max()) if not post_deltas.empty else 0.0
-    gaps = int((post_deltas > 45).sum())
+    gaps = int((post_deltas > float(timeframe_minutes) * 1.5).sum())
     external = tuple(
         column for column in bars.columns
         if column not in {"open", "high", "low", "close", "volume"}
@@ -247,11 +257,12 @@ def prepare_bars(
         rows=int(len(bars)),
         start=bars.index.min().isoformat(),
         end=bars.index.max().isoformat(),
-        median_interval_minutes=float(post_deltas.median()) if not post_deltas.empty else 30.0,
+        timeframe_minutes=int(timeframe_minutes),
+        median_interval_minutes=float(post_deltas.median()) if not post_deltas.empty else float(timeframe_minutes),
         largest_gap_minutes=largest_gap,
-        gaps_over_45m=gaps,
+        gaps_over_expected=gaps,
         duplicate_timestamps_removed=duplicate_count,
-        resampled_to_30m=should_resample,
+        resampled_to_timeframe=should_resample,
         has_volume="volume" in bars.columns and bool(bars["volume"].notna().any()),
         external_columns=external,
     )
@@ -261,6 +272,7 @@ def prepare_bars(
 def load_bars(
     path: Union[str, Path],
     *,
+    timeframe_minutes: int = 30,
     resample: bool = True,
     return_report: bool = False,
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, DataQualityReport]]:
@@ -276,7 +288,12 @@ def load_bars(
         frame = pd.read_csv(source, sep=None, engine="python")
     except Exception as exc:  # pragma: no cover - parser-specific errors
         raise DataError(f"could not read {source}: {exc}") from exc
-    return prepare_bars(frame, resample=resample, return_report=return_report)
+    return prepare_bars(
+        frame,
+        timeframe_minutes=timeframe_minutes,
+        resample=resample,
+        return_report=return_report,
+    )
 
 
 def download_yahoo_30m(

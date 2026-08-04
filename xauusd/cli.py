@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Sequence
 from .config import ResearchConfig
 from .data import DataError, download_yahoo_30m, load_bars
 from .features import build_features
-from .research import predict_latest_from_bars, run_research
+from .research import predict_latest_from_bars, run_forward_dry_run, run_research
 
 
 def _write_json(path: str | Path, payload: Dict[str, Any]) -> None:
@@ -21,6 +21,7 @@ def _write_json(path: str | Path, payload: Dict[str, Any]) -> None:
 
 def _config_from_args(args: argparse.Namespace) -> ResearchConfig:
     return ResearchConfig(
+        timeframe_minutes=args.timeframe,
         horizon_bars=args.horizon,
         label_threshold_bps=args.label_threshold_bps,
         label_atr_fraction=args.label_atr_fraction,
@@ -36,7 +37,8 @@ def _config_from_args(args: argparse.Namespace) -> ResearchConfig:
 
 
 def _add_research_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--horizon", type=int, default=1, help="bars ahead; 1 means the next 30m bar")
+    parser.add_argument("--timeframe", type=int, choices=(30, 60), default=30, help="bar size in minutes")
+    parser.add_argument("--horizon", type=int, default=1, help="bars ahead; 1 means the next target-timeframe bar")
     parser.add_argument("--label-threshold-bps", type=float, default=5.0, help="fixed dead-zone for labels")
     parser.add_argument("--label-atr-fraction", type=float, default=0.10, help="ATR-relative dead-zone")
     parser.add_argument("--target-hit-rate", type=float, default=0.80, help="validation/test selection target")
@@ -68,6 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--report", default="reports/xauusd_30m.json")
     _add_research_options(train)
 
+    dry_run = subparsers.add_parser(
+        "dry-run",
+        help="fit only before a date and replay a later period with no orders",
+    )
+    dry_run.add_argument("--csv", required=True, help="real broker/vendor OHLCV CSV")
+    dry_run.add_argument("--start", required=True, help="inclusive UTC start, e.g. 2026-07-01")
+    dry_run.add_argument("--end", default=None, help="exclusive UTC end, e.g. 2026-08-01")
+    dry_run.add_argument("--model", default="artifacts/xauusd_dry_run.joblib")
+    dry_run.add_argument("--report", default="reports/xauusd_dry_run.json")
+    _add_research_options(dry_run)
+
     predict = subparsers.add_parser("predict", help="score the latest complete bar; never places an order")
     predict.add_argument("--csv", required=True)
     predict.add_argument("--model", default="artifacts/xauusd_30m.joblib")
@@ -79,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     quality = subparsers.add_parser("quality", help="validate a CSV and print its data-quality report")
     quality.add_argument("--csv", required=True)
+    quality.add_argument("--timeframe", type=int, choices=(30, 60), default=30)
 
     return parser
 
@@ -88,7 +102,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "quality":
-            _, report = load_bars(args.csv, return_report=True)
+            _, report = load_bars(
+                args.csv,
+                timeframe_minutes=args.timeframe,
+                return_report=True,
+            )
             print(json.dumps(report.to_dict(), indent=2, default=str))
             return 0
 
@@ -101,8 +119,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "train":
-            bars, data_report = load_bars(args.csv, return_report=True)
             config = _config_from_args(args)
+            bars, data_report = load_bars(
+                args.csv,
+                timeframe_minutes=config.timeframe_minutes,
+                return_report=True,
+            )
             result = run_research(bars, config)
             result.report["data_quality"] = data_report.to_dict()
             if args.walk_forward_folds:
@@ -124,8 +146,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }, indent=2, default=str))
             return 0 if result.report["status"] == "target_met_on_holdout" else 2
 
+        if args.command == "dry-run":
+            config = _config_from_args(args)
+            bars, data_report = load_bars(
+                args.csv,
+                timeframe_minutes=config.timeframe_minutes,
+                return_report=True,
+            )
+            result = run_forward_dry_run(bars, args.start, args.end, config)
+            result.report["data_quality"] = data_report.to_dict()
+            result.save(args.model)
+            _write_json(args.report, result.report)
+            print(json.dumps({
+                "status": result.report["status"],
+                "timeframe_minutes": config.timeframe_minutes,
+                "forward_period": result.report.get("forward_period", {}),
+                "model": str(args.model),
+                "report": str(args.report),
+                "forward_dry_run": result.report.get("forward_dry_run", {}),
+                "certification": result.report.get("certification", {}),
+            }, indent=2, default=str))
+            return 0 if result.report["status"] == "target_met_on_forward_dry_run" else 2
+
         if args.command == "predict":
-            bars = load_bars(args.csv)
+            # The artifact records whether it was trained at 30m or 1h; the
+            # helper performs the correct normalization after loading it.
+            bars = load_bars(args.csv, resample=False)
             signal = predict_latest_from_bars(bars, args.model)
             if args.json:
                 print(json.dumps(signal, indent=2, default=str))
