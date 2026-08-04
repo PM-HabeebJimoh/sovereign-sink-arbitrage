@@ -35,8 +35,25 @@ class DataQualityReport:
     has_volume: bool
     external_columns: Tuple[str, ...]
 
+    @property
+    def resampled_to_30m(self) -> bool:
+        """Backward-compatible alias for older 30m reports."""
+
+        return self.resampled_to_timeframe and self.timeframe_minutes == 30
+
+    @property
+    def gaps_over_45m(self) -> int:
+        """Backward-compatible alias; new reports use gaps_over_expected."""
+
+        return self.gaps_over_expected
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Keep older consumers working while making the target timeframe
+        # explicit for 1-hour experiments.
+        payload["resampled_to_30m"] = self.resampled_to_30m
+        payload["gaps_over_45m"] = self.gaps_over_45m
+        return payload
 
 
 # Brokers and vendors use dozens of variants for these columns.  Normalising
@@ -296,25 +313,30 @@ def load_bars(
     )
 
 
-def download_yahoo_30m(
+def download_yahoo_intraday(
     symbol: str = "GC=F",
     *,
+    timeframe_minutes: int = 30,
     period1: Optional[int] = None,
     period2: Optional[int] = None,
     timeout: int = 30,
 ) -> pd.DataFrame:
-    """Download Yahoo chart data without adding a heavyweight data package.
+    """Download real Yahoo intraday gold data for 30m or 1h experiments.
 
-    Yahoo's 30-minute retention is limited and ``GC=F`` is gold futures, not
-    broker-specific spot XAUUSD.  This helper is for quick experiments only;
-    use a broker/tick vendor export for a production-quality history.
+    ``GC=F`` is COMEX gold futures, not broker-specific spot XAUUSD. Yahoo's
+    intraday retention and session construction are vendor limitations; use a
+    broker/Dukascopy XAUUSD export for a strict spot-pair result.
     """
+
+    if timeframe_minutes not in (30, 60):
+        raise DataError("timeframe_minutes must be 30 or 60")
+    interval = "30m" if timeframe_minutes == 30 else "1h"
 
     import time
     from urllib.parse import quote
     import requests
 
-    params: Dict[str, Any] = {"interval": "30m", "events": "history", "includePrePost": "true"}
+    params: Dict[str, Any] = {"interval": interval, "events": "history", "includePrePost": "true"}
     if period1 is None or period2 is None:
         params["range"] = "60d"
     else:
@@ -346,4 +368,22 @@ def download_yahoo_30m(
     # Avoid a cache/proxy serving an old response being mistaken for current
     # data in a notebook; the timestamp is retained in the returned frame.
     frame.attrs["source"] = f"Yahoo chart {symbol} fetched {time.time():.0f}"
-    return prepare_bars(frame, resample=False)
+    return prepare_bars(frame, timeframe_minutes=timeframe_minutes, resample=False)
+
+
+def download_yahoo_30m(
+    symbol: str = "GC=F",
+    *,
+    period1: Optional[int] = None,
+    period2: Optional[int] = None,
+    timeout: int = 30,
+) -> pd.DataFrame:
+    """Backward-compatible wrapper for the 30-minute Yahoo helper."""
+
+    return download_yahoo_intraday(
+        symbol,
+        timeframe_minutes=30,
+        period1=period1,
+        period2=period2,
+        timeout=timeout,
+    )

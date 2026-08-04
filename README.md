@@ -87,7 +87,29 @@ python -m xauusd train --csv data/xauusd_30m.csv \
   --round-trip-cost-bps 7 --slippage-bps 2
 ```
 
-### 5. Generate a latest-bar research signal
+### 5. Forward dry-run a real historical month
+
+The `dry-run` command fits only on data before the requested start date. It then replays the forward period with no broker connection or order placement. This is the correct way to test July 2026 without using July outcomes to tune the model:
+
+```bash
+# 30-minute spot XAUUSD broker/Dukascopy CSV
+python -m xauusd dry-run \
+  --csv data/xauusd_m30.csv --timeframe 30 \
+  --start 2026-07-01 --end 2026-08-01 \
+  --model reports/xauusd_m30.joblib \
+  --report reports/xauusd_m30.json
+
+# 1-hour spot XAUUSD CSV
+python -m xauusd dry-run \
+  --csv data/xauusd_h1.csv --timeframe 60 \
+  --start 2026-07-01 --end 2026-08-01 \
+  --model reports/xauusd_h1.joblib \
+  --report reports/xauusd_h1.json
+```
+
+The forward report includes exact data range, signal count, coverage, hit rate, Wilson confidence bound, cost-adjusted returns and a `status`. It is a dry-run even when the status is successful; it never places orders.
+
+### 6. Generate a latest-bar research signal
 
 ```bash
 python -m xauusd predict \
@@ -100,14 +122,14 @@ Possible directions are `UP`, `DOWN` and `NO_TRADE`. `NO_TRADE` is a designed ou
 
 ### Optional quick Yahoo experiment
 
-Yahoo's 30m retention is limited and `GC=F` is futures:
+Yahoo's intraday retention is limited and `GC=F` is COMEX gold futures, not spot XAUUSD:
 
 ```bash
-python -m xauusd download-yahoo --symbol 'GC=F' --out /tmp/gold_30m.csv
-python -m xauusd quality --csv /tmp/gold_30m.csv
+python -m xauusd download-yahoo --symbol 'GC=F' --timeframe 30 --out /tmp/gold_30m.csv
+python -m xauusd download-yahoo --symbol 'GC=F' --timeframe 60 --out /tmp/gold_1h.csv
 ```
 
-Do not use this small, vendor-mismatched sample to certify a production hit rate.
+Do not use this small, vendor-mismatched sample to certify a production XAUUSD hit rate. For the requested July 2026 dry-run, use real broker/Dukascopy spot XAUUSD candles instead of substituting `GC=F`.
 
 ## What is measured
 

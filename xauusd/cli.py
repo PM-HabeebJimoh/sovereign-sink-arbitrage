@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from .config import ResearchConfig
-from .data import DataError, download_yahoo_30m, load_bars
+from .data import DataError, download_yahoo_intraday, load_bars
 from .features import build_features
 from .research import predict_latest_from_bars, run_forward_dry_run, run_research
 
@@ -86,8 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--model", default="artifacts/xauusd_30m.joblib")
     predict.add_argument("--json", action="store_true", help="emit JSON only")
 
-    download = subparsers.add_parser("download-yahoo", help="download a small 30m experiment data set")
+    download = subparsers.add_parser("download-yahoo", help="download a small real gold-futures experiment data set")
     download.add_argument("--symbol", default="GC=F", help="GC=F futures; not broker spot XAUUSD")
+    download.add_argument("--timeframe", type=int, choices=(30, 60), default=30)
     download.add_argument("--out", required=True)
 
     quality = subparsers.add_parser("quality", help="validate a CSV and print its data-quality report")
@@ -111,11 +112,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "download-yahoo":
-            bars = download_yahoo_30m(args.symbol)
+            bars = download_yahoo_intraday(args.symbol, timeframe_minutes=args.timeframe)
             destination = Path(args.out)
             destination.parent.mkdir(parents=True, exist_ok=True)
             bars.reset_index().to_csv(destination, index=False)
-            print(f"wrote {len(bars)} 30-minute bars to {destination}")
+            print(f"wrote {len(bars)} {args.timeframe}-minute bars to {destination}")
             return 0
 
         if args.command == "train":

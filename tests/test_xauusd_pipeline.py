@@ -50,6 +50,13 @@ def test_features_do_not_use_a_future_close() -> None:
     pd.testing.assert_frame_equal(original.iloc[:600], changed_built.iloc[:600])
 
 
+def test_one_hour_normalisation_is_supported() -> None:
+    bars, report = prepare_bars(make_bars(120), timeframe_minutes=60, return_report=True)
+    assert report.timeframe_minutes == 60
+    assert report.median_interval_minutes == 60.0
+    assert len(bars) < 120
+
+
 def test_label_uses_next_open_to_next_close() -> None:
     bars = make_bars(300)
     labelled, _ = build_labeled_frame(
