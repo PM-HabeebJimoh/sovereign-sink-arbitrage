@@ -1,1 +1,1 @@
-worker: python3 live_execution_engine.py
+# Intentionally no autonomous trading worker. Run `python -m xauusd --help` locally.
